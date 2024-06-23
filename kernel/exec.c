@@ -116,6 +116,21 @@ exec(char *path, char **argv)
   p->trapframe->sp = sp; // initial stack pointer
   proc_freepagetable(oldpagetable, oldsz);
 
+  //打印进程的页表
+  if(p->pid == 1){
+    vmprint(p->pagetable);
+  }
+
+  // 拷贝pagetable 和 kernelpg的前半段映射保持一致
+  if(u2kvmcopy(p->pagetable, p->kernelpg, 0, p->sz) != 0){
+    goto bad;
+  }
+
+  // 因为新load进来了新的program，刷新一下内存映射
+  w_satp(MAKE_SATP(p->kernelpg));
+  sfence_vma();
+
+
   return argc; // this ends up in a0, the first argument to main(argc, argv)
 
  bad:

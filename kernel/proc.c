@@ -21,6 +21,8 @@ static void freeproc(struct proc *p);
 
 extern char trampoline[]; // trampoline.S
 
+extern char etext[];  // kernel.ld sets this to end of kernel code.
+
 // initialize the proc table at boot time.
 void
 procinit(void)
@@ -121,6 +123,25 @@ found:
     return 0;
   }
 
+  // 添加一个内核页表
+  p->kernelpg = pro_kpt_init();
+  if(p->kernelpg == 0){
+    freeproc(p);
+    release(&p->lock);
+    return 0;
+  }
+
+  // 为进程的内核栈 remap
+  // physical address is already allocated 
+  // char *pa = kalloc();
+  // if(pa == 0)
+  //   panic("kalloc");
+  uint64 va = KSTACK((int) (p - proc));
+  pte_t pa = kvmpa(va);
+  memset((void *)pa, 0, PGSIZE);
+  uvmmap(p->kernelpg, va, (uint64)pa, PGSIZE, PTE_R | PTE_W);
+  p->kstack = va;
+
   // Set up new context to start executing at forkret,
   // which returns to user space.
   memset(&p->context, 0, sizeof(p->context));
@@ -129,6 +150,39 @@ found:
 
   return p;
 }
+
+// 释放内核页表副本的新方法
+// 这里只需要释放页表占用的空间，而不需要释放内核的物理空间
+void
+proc_freekernelpg(pagetable_t kernelpg){
+  for(int i = 0; i < 512; i++){
+    pte_t pte = kernelpg[i];
+    if((pte & PTE_V)){
+      kernelpg[i] = 0;
+      if((pte & (PTE_R|PTE_W|PTE_X)) == 0){
+        uint64 child = PTE2PA(pte);
+        proc_freekernelpg((pagetable_t)child);
+      }
+    }
+  }
+  kfree((void*)kernelpg);
+}
+//销毁映射
+void freeprockvm(struct proc* p){
+  pagetable_t kpagetable = p->kernelpg;
+  // reverse order of allocation
+  // 按分配顺序的逆序来销毁映射, 但不回收物理地址
+  ukvmunmap(kpagetable, p->kstack, PGSIZE/PGSIZE);
+  ukvmunmap(kpagetable, TRAMPOLINE, PGSIZE/PGSIZE);
+  ukvmunmap(kpagetable, (uint64)etext, (PHYSTOP-(uint64)etext)/PGSIZE);
+  ukvmunmap(kpagetable, KERNBASE, ((uint64)etext-KERNBASE)/PGSIZE);
+  ukvmunmap(kpagetable, PLIC, 0x400000/PGSIZE);
+  ukvmunmap(kpagetable, CLINT, 0x10000/PGSIZE);
+  ukvmunmap(kpagetable, VIRTIO0, PGSIZE/PGSIZE);
+  ukvmunmap(kpagetable, UART0, PGSIZE/PGSIZE);
+  proc_freekernelpg(p->kernelpg);
+}
+
 
 // free a proc structure and the data hanging from it,
 // including user pages.
@@ -150,6 +204,12 @@ freeproc(struct proc *p)
   p->killed = 0;
   p->xstate = 0;
   p->state = UNUSED;
+
+  // free副本
+  if(p->kernelpg){
+    freeprockvm(p);
+    p->kernelpg = 0;
+  }
 }
 
 // Create a user page table for a given process,
@@ -221,6 +281,9 @@ userinit(void)
   uvminit(p->pagetable, initcode, sizeof(initcode));
   p->sz = PGSIZE;
 
+  // 匹配pagetable 和 kenelpagetable
+  u2kvmcopy(p->pagetable, p->kernelpg, 0, p->sz);
+
   // prepare for the very first "return" from kernel to user.
   p->trapframe->epc = 0;      // user program counter
   p->trapframe->sp = PGSIZE;  // user stack pointer
@@ -243,7 +306,16 @@ growproc(int n)
 
   sz = p->sz;
   if(n > 0){
+    // 加上PLIC限制
+    if(PGROUNDUP(sz + n) >= PLIC){
+      return -1;
+    }
     if((sz = uvmalloc(p->pagetable, sz, sz + n)) == 0) {
+      return -1;
+    }
+
+    // 增量同步
+    if(u2kvmcopy(p->pagetable, p->kernelpg, p->sz, sz) != 0){
       return -1;
     }
   } else if(n < 0){
@@ -274,6 +346,13 @@ fork(void)
     return -1;
   }
   np->sz = p->sz;
+
+  // 保证新增加的进程pagetable 和 kernelpg的前半段映射保持一致
+  if(u2kvmcopy(np->pagetable, np->kernelpg, 0, np->sz) != 0){
+    freeproc(np);
+    release(&np->lock);
+    return -1;
+  }
 
   np->parent = p;
 
@@ -473,7 +552,14 @@ scheduler(void)
         // before jumping back to us.
         p->state = RUNNING;
         c->proc = p;
+
+        // 加载内核页表副本到SATP寄存器
+        proc_inithart(p->kernelpg);
+
         swtch(&c->context, &p->context);
+
+        // 加载回原来的内核页表
+        kvminithart();
 
         // Process is done running for now.
         // It should have changed its p->state before coming back.
