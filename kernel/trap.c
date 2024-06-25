@@ -77,9 +77,18 @@ usertrap(void)
     exit(-1);
 
   // give up the CPU if this is a timer interrupt.
-  if(which_dev == 2)
+  if(which_dev == 2){
+    p->ticks_count++;
+    if(p->alarm_interval != 0 && p->ticks_count == p->alarm_interval && p->is_alarming == 0){
+      p->is_alarming = 1;
+      //设置寄存器内容
+      memmove(p->alarm_trapframe, p->trapframe, sizeof(struct trapframe));
+      //设立返回到用户态后到跳转指令地址
+      p->trapframe->epc = (uint64)p->alarm_handler;
+    }
     yield();
-
+  }
+    
   usertrapret();
 }
 
