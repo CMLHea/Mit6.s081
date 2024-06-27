@@ -68,6 +68,23 @@ int
 argaddr(int n, uint64 *ip)
 {
   *ip = argraw(n);
+  struct proc* p = myproc();
+
+  //处理向系统调用传入lazy allocation地址的情况
+  if(walkaddr(p->pagetable, *ip) == 0){
+    if(PGROUNDUP(p->trapframe->sp) - 1 < *ip && *ip < p->sz){
+      uint64 pa = (uint64)kalloc();
+      if(pa == 0)
+        return -1;
+      memset((void*)pa, 0, PGSIZE);
+
+
+      if(mappages(p->pagetable, PGROUNDDOWN(*ip), PGSIZE, pa, PTE_R | PTE_W | PTE_X | PTE_U) != 0){
+        kfree((void*)pa);
+        return -1;
+      }
+    } 
+  }
   return 0;
 }
 
