@@ -1,6 +1,9 @@
 #define T_DIR     1   // Directory
 #define T_FILE    2   // File
 #define T_DEVICE  3   // Device
+#define T_SYMLINK 4   //符号链接
+
+#define MAX_SYMLINK_DEPTH 10 //最大链接深度
 
 struct stat {
   int dev;     // File system's disk device
